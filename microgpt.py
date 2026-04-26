@@ -83,7 +83,13 @@ block_size = 16 # maximum context length of the attention window (note: the long
 n_head = 4      # number of attention heads
 head_dim = n_embd // n_head # derived dimension of each head
 matrix = lambda nout, nin, std=0.08: [[Value(random.gauss(0, std)) for _ in range(nin)] for _ in range(nout)]
+matrix_zeros = lambda nout, nin: [[Value(0.0) for _ in range(nin)] for _ in range(nout)]
 state_dict = {'wte': matrix(vocab_size, n_embd), 'wpe': matrix(block_size, n_embd), 'lm_head': matrix(vocab_size, n_embd)}
+LORA_USAGE = True
+LORA_R = 4
+LORA_ALPHA = 4
+LORA_TARGETS = ("attn_wq", "attn_wv")
+FREEZE_BASE_WEIGHTS = True
 for i in range(n_layer):
     state_dict[f'layer{i}.attn_wq'] = matrix(n_embd, n_embd)
     state_dict[f'layer{i}.attn_wk'] = matrix(n_embd, n_embd)
@@ -91,13 +97,32 @@ for i in range(n_layer):
     state_dict[f'layer{i}.attn_wo'] = matrix(n_embd, n_embd)
     state_dict[f'layer{i}.mlp_fc1'] = matrix(4 * n_embd, n_embd)
     state_dict[f'layer{i}.mlp_fc2'] = matrix(n_embd, 4 * n_embd)
-params = [p for mat in state_dict.values() for row in mat for p in row] # flatten params into a single list[Value]
+    for proj in LORA_TARGETS:
+        state_dict[f'layer{i}.{proj}.lora_A'] = matrix(LORA_R, n_embd)
+        state_dict[f'layer{i}.{proj}.lora_B'] = matrix_zeros(n_embd, LORA_R)
+def flatten(mats):
+    return [p for mat in mats for row in mat for p in row] # flatten params into a single list[Value]
+if LORA_USAGE and FREEZE_BASE_WEIGHTS:
+    lora_mats = [v for k, v in state_dict.items() if ".lora_" in k]
+    params = flatten (lora_mats)
+else:
+    params = flatten(state_dict.values())
+
 print(f"num params: {len(params)}")
 
 # Define the model architecture: a function mapping tokens and parameters to logits over what comes next
 # Follow GPT-2, blessed among the GPTs, with minor differences: layernorm -> rmsnorm, no biases, GeLU -> ~ReLU~ --> GELU (20260425 edit LRascon)
 def linear(x, w):
     return [sum(wi * xi for wi, xi in zip(wo, x)) for wo in w]
+
+def linear_lora(x, w, A=None, B=None, alpha = 1.0):
+    base = linear(x, w)
+    if A is None or B is None:
+        return base
+    z = linear (x, A)
+    delta = linear(z, B)
+    scale = alpha / len(A)
+    return [b + scale * d for b, d in zip(base, delta)]
 
 def softmax(logits):
     max_val = max(val.data for val in logits)
@@ -120,9 +145,26 @@ def gpt(token_id, pos_id, keys, values):
         # 1) Multi-head Attention block
         x_residual = x
         x = rmsnorm(x)
-        q = linear(x, state_dict[f'layer{li}.attn_wq'])
         k = linear(x, state_dict[f'layer{li}.attn_wk'])
-        v = linear(x, state_dict[f'layer{li}.attn_wv'])
+        
+        if LORA_USAGE:
+            q = linear_lora(
+                x,
+                state_dict[f'layer{li}.attn_wq'],
+                state_dict[f'layer{li}.attn_wq.lora_A'],
+                state_dict[f'layer{li}.attn_wq.lora_B'],
+                alpha=LORA_ALPHA
+            )
+            v = linear_lora(
+                x,
+                state_dict[f'layer{li}.attn_wv'],
+                state_dict[f'layer{li}.attn_wv.lora_A'],
+                state_dict[f'layer{li}.attn_wv.lora_B'],
+                alpha=LORA_ALPHA
+            )
+        else:
+            q = linear(x, state_dict[f'layer{li}.attn_wq'])
+            v = linear(x, state_dict[f'layer{li}.attn_wv'])
         keys[li].append(k)
         values[li].append(v)
         x_attn = []
