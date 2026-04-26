@@ -90,13 +90,23 @@ LORA_R = 4
 LORA_ALPHA = 4
 LORA_TARGETS = ("attn_wq", "attn_wv")
 FREEZE_BASE_WEIGHTS = True
+MOE_USAGE = True
+MOE_NUM_EXPERTS = 4
+MOE_TOP_K = 1
+MOE_DENSE = True
 for i in range(n_layer):
     state_dict[f'layer{i}.attn_wq'] = matrix(n_embd, n_embd)
     state_dict[f'layer{i}.attn_wk'] = matrix(n_embd, n_embd)
     state_dict[f'layer{i}.attn_wv'] = matrix(n_embd, n_embd)
     state_dict[f'layer{i}.attn_wo'] = matrix(n_embd, n_embd)
-    state_dict[f'layer{i}.mlp_fc1'] = matrix(4 * n_embd, n_embd)
-    state_dict[f'layer{i}.mlp_fc2'] = matrix(n_embd, 4 * n_embd)
+    if MOE_USAGE:
+        state_dict[f'layer{i}.moe_gate'] = matrix(MOE_NUM_EXPERTS, n_embd)
+        for e in range(MOE_NUM_EXPERTS):
+            state_dict[f'layer{i}.moe_e{e}.fc1'] = matrix(4 * n_embd, n_embd)
+            state_dict[f'layer{i}.moe_e{e}.fc2'] = matrix(n_embd, 4 * n_embd)
+    else:
+        state_dict[f'layer{i}.mlp_fc1'] = matrix(4 * n_embd, n_embd)
+        state_dict[f'layer{i}.mlp_fc2'] = matrix(n_embd, 4 * n_embd)
     for proj in LORA_TARGETS:
         state_dict[f'layer{i}.{proj}.lora_A'] = matrix(LORA_R, n_embd)
         state_dict[f'layer{i}.{proj}.lora_B'] = matrix_zeros(n_embd, LORA_R)
@@ -107,6 +117,8 @@ if LORA_USAGE and FREEZE_BASE_WEIGHTS:
     params = flatten (lora_mats)
 else:
     params = flatten(state_dict.values())
+
+
 
 ROPE_USAGE = True
 ROPE_BASE = 10000.0
@@ -133,6 +145,27 @@ def apply_rope(x, pos, head_dim, base=10000.0):
             out[hs + i] = x0 * c - x1 * s
             out[hs + i + 1] = x0 * s + x1 * c
             
+    return out
+
+def expert_ffn(x, fc1, fc2):
+    h = linear(x, fc1)
+    h = [xi.gelu() for xi in h]
+    return linear(h, fc2)
+
+def moe_ffn(x, li):
+    gate_logits = linear(x, state_dict[f'layer{li}.moe_gate'])
+    gate = softmax(gate_logits)
+
+    expert_outs = []
+    for e in range(MOE_NUM_EXPERTS):
+        fc1 = state_dict[f'layer{li}.moe_e{e}.fc1']
+        fc2 = state_dict[f'layer{li}.moe_e{e}.fc2']
+        expert_outs.append(expert_ffn(x, fc1, fc2))
+
+    out = []
+    for d in range(n_embd):
+        out_d = sum(gate[e] * expert_outs[e][d] for e in range(MOE_NUM_EXPERTS))
+        out.append(out_d)
     return out
 
 def linear(x, w):
@@ -208,10 +241,13 @@ def gpt(token_id, pos_id, keys, values):
         # 2) MLP block
         x_residual = x
         x = rmsnorm(x)
-        x = linear(x, state_dict[f'layer{li}.mlp_fc1'])
-        # GELU edit: 20260426 LRascon
-        x = [xi.gelu() for xi in x]
-        x = linear(x, state_dict[f'layer{li}.mlp_fc2'])
+        if MOE_USAGE:
+            x = moe_ffn(x, li)
+        else:
+            x = linear(x, state_dict[f'layer{li}.mlp_fc1'])
+            x = [xi.gelu() for xi in x]
+            x = linear(x, state_dict[f'layer{li}.mlp_fc2'])
+            
         x = [a + b for a, b in zip(x, x_residual)]
 
     logits = linear(x, state_dict['lm_head'])
