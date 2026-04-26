@@ -108,10 +108,33 @@ if LORA_USAGE and FREEZE_BASE_WEIGHTS:
 else:
     params = flatten(state_dict.values())
 
+ROPE_USAGE = True
+ROPE_BASE = 10000.0
+
 print(f"num params: {len(params)}")
 
 # Define the model architecture: a function mapping tokens and parameters to logits over what comes next
 # Follow GPT-2, blessed among the GPTs, with minor differences: layernorm -> rmsnorm, no biases, GeLU -> ~ReLU~ --> GELU (20260425 edit LRascon)
+
+def apply_rope(x, pos, head_dim, base=10000.0):
+    assert head_dim % 2 == 0, "head_dim must be even for RoPE"
+    out = x[:]
+    n_embd = len(x)
+    n_head = n_embd // head_dim
+    for h in range(n_head):
+        hs = h * head_dim
+        for i in range(0, head_dim, 2):
+            pair_idx = i // 2
+            theta = pos * (base ** (-2.0 * pair_idx / head_dim))
+            c = math.cos(theta)
+            s = math.sin(theta)
+            x0 = x[hs + i]
+            x1 = x[hs + i + 1]
+            out[hs + i] = x0 * c - x1 * s
+            out[hs + i + 1] = x0 * s + x1 * c
+            
+    return out
+
 def linear(x, w):
     return [sum(wi * xi for wi, xi in zip(wo, x)) for wo in w]
 
@@ -137,7 +160,7 @@ def rmsnorm(x):
 
 def gpt(token_id, pos_id, keys, values):
     tok_emb = state_dict['wte'][token_id] # token embedding
-    pos_emb = state_dict['wpe'][pos_id] # position embedding
+    pos_emb = state_dict['wpe'][pos_id] if not ROPE_USAGE else [Value(0.0) for _ in range(n_embd)] # position embedding
     x = [t + p for t, p in zip(tok_emb, pos_emb)] # joint token and position embedding
     x = rmsnorm(x) # note: not redundant due to backward pass via the residual connection
 
@@ -165,6 +188,9 @@ def gpt(token_id, pos_id, keys, values):
         else:
             q = linear(x, state_dict[f'layer{li}.attn_wq'])
             v = linear(x, state_dict[f'layer{li}.attn_wv'])
+        if ROPE_USAGE:
+            q = apply_rope(q, pos_id, head_dim, base=ROPE_BASE)
+            k = apply_rope(k, pos_id, head_dim, base=ROPE_BASE)
         keys[li].append(k)
         values[li].append(v)
         x_attn = []
