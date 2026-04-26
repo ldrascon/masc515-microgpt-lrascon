@@ -49,5 +49,5 @@ This microgpt implementation applies LoRA to the Transformer self-attention proj
 - `LORA_ALPHA` (scaling): controls \(\alpha\)
 - scale factor implemented as \(\alpha/r\) 
 
-### Notes / limitations (important context)
+### Notes / limitations
 LoRA is primarily motivated as an **adaptation method for pretrained models**. LoRA is included here to demonstrate the algorithmic mechanism and how low-rank updates can be pushed into attention layers. 
