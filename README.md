@@ -3,8 +3,6 @@
 ## Low-Rank Adaptation (LoRA) Branch
 LoRA is a parameter-efficient fine-tuning method for large models.
 Here, rather than updating a full-weight matrix during adaptation, LoRA freezes the pretrained weight and learns a low-rank update that is much smaller than the original matrix, per Hu et al.
-The GELU activation, as sourced from Hendrycks and Gimpel, is defined as GELU(x) = x((phi)(x)), where phi is the standard normal CDF.
-As suggested in the papter, the fast approximation was used: GELU(x) = ~ x*(sigma)(1.702x), where sigma is the sigmoid function.
 
 For a dense layer with pretrained weights \(W_0 \in \mathbb{R}^{d \times k}\), LoRA reparameterizes the update as:
 
